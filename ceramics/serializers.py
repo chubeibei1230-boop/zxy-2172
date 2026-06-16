@@ -89,7 +89,7 @@ class FiringRecordListSerializer(serializers.ModelSerializer):
             return []
         orders = obj.rectification_orders.select_related(
             'responsible_person'
-        ).all()[:5]
+        ).all()
         return FiringRecordRectificationSummarySerializer([
             {
                 'id': o.id,
@@ -452,6 +452,20 @@ class RectificationOrderCreateSerializer(serializers.ModelSerializer):
         firing_record = data.get('firing_record')
         anomaly_type = data.get('anomaly_type')
 
+        active_duplicate_exists = RectificationOrder.objects.filter(
+            firing_record=firing_record,
+            anomaly_type=anomaly_type,
+            status__in=(
+                RectificationOrder.STATUS_PENDING_ANALYSIS,
+                RectificationOrder.STATUS_RECTIFYING,
+                RectificationOrder.STATUS_PENDING_CONFIRM,
+            ),
+        ).exists()
+        if active_duplicate_exists:
+            raise serializers.ValidationError(
+                {'anomaly_type': '该试烧记录已存在同类处理中整改单，请勿重复发起'}
+            )
+
         if anomaly_type == RectificationOrder.ANOMALY_COLOR_DIFF_HIGH:
             if firing_record.color_difference not in (FiringRecord.COLOR_DIFF_HIGH, FiringRecord.COLOR_DIFF_SEVERE):
                 raise serializers.ValidationError(
@@ -561,6 +575,7 @@ class RectificationReopenSerializer(serializers.Serializer):
 
 
 class RectificationDashboardSerializer(serializers.Serializer):
+    pending_total_count = serializers.IntegerField()
     pending_count = serializers.IntegerField()
     rectifying_count = serializers.IntegerField()
     pending_confirm_count = serializers.IntegerField()

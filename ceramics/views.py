@@ -909,6 +909,14 @@ def rectification_dashboard(request):
     now = timezone.now()
     today = now.date()
 
+    pending_total_count = RectificationOrder.objects.filter(
+        status__in=[
+            RectificationOrder.STATUS_PENDING_ANALYSIS,
+            RectificationOrder.STATUS_RECTIFYING,
+            RectificationOrder.STATUS_PENDING_CONFIRM,
+        ]
+    ).count()
+
     pending_count = RectificationOrder.objects.filter(
         status=RectificationOrder.STATUS_PENDING_ANALYSIS
     ).count()
@@ -950,6 +958,7 @@ def rectification_dashboard(request):
     ).order_by('-close_time')[:10]
 
     data = {
+        'pending_total_count': pending_total_count,
         'pending_count': pending_count,
         'rectifying_count': rectifying_count,
         'pending_confirm_count': pending_confirm_count,
