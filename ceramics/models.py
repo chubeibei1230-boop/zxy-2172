@@ -65,6 +65,7 @@ class FiringRecord(models.Model):
     STATUS_PENDING = 'pending'
     STATUS_FIRING = 'firing'
     STATUS_PENDING_RETEST = 'pending_retest'
+    STATUS_RETESTED = 'retested'
     STATUS_ADJUSTING = 'adjusting'
     STATUS_APPROVED = 'approved'
     STATUS_SUSPENDED = 'suspended'
@@ -73,6 +74,7 @@ class FiringRecord(models.Model):
         (STATUS_PENDING, '待试烧'),
         (STATUS_FIRING, '试烧中'),
         (STATUS_PENDING_RETEST, '待复测'),
+        (STATUS_RETESTED, '已复测'),
         (STATUS_ADJUSTING, '调整中'),
         (STATUS_APPROVED, '可定样'),
         (STATUS_SUSPENDED, '暂停使用'),

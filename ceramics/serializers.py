@@ -94,7 +94,7 @@ class FiringRecordCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {'kiln_in_time': '试烧中状态必须填写入窑时间'}
             )
-        if status_val in (FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_ADJUSTING,
+        if status_val in (FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_RETESTED, FiringRecord.STATUS_ADJUSTING,
                           FiringRecord.STATUS_APPROVED, FiringRecord.STATUS_SUSPENDED):
             if not data.get('kiln_out_time') and not (instance and instance.kiln_out_time):
                 raise serializers.ValidationError(
@@ -135,7 +135,7 @@ class FiringRecordUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {'kiln_in_time': '试烧中状态必须填写入窑时间'}
             )
-        if status_val in (FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_ADJUSTING,
+        if status_val in (FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_RETESTED, FiringRecord.STATUS_ADJUSTING,
                           FiringRecord.STATUS_APPROVED, FiringRecord.STATUS_SUSPENDED):
             if not kiln_out_time:
                 raise serializers.ValidationError(
@@ -190,6 +190,7 @@ class RetestSerializer(serializers.Serializer):
     def update(self, instance, validated_data):
         instance.retest_conclusion = validated_data['retest_conclusion']
         instance.handling_suggestion = validated_data.get('handling_suggestion', instance.handling_suggestion)
+        instance.status = FiringRecord.STATUS_RETESTED
         instance.save()
         return instance
 

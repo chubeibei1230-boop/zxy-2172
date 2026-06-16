@@ -139,9 +139,9 @@ class FiringRecordViewSet(viewsets.ModelViewSet):
                 {'detail': '未出窑的记录不能进入调整中状态，请先执行出窑操作'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if record.status not in (FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_ADJUSTING):
+        if record.status not in (FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_RETESTED, FiringRecord.STATUS_ADJUSTING):
             return Response(
-                {'detail': f'当前状态为"{record.get_status_display()}"，只有"待复测"状态可执行调整操作'},
+                {'detail': f'当前状态为"{record.get_status_display()}"，只有"待复测"或"已复测"状态可执行调整操作'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         serializer = AdjustSerializer(instance=record, data=request.data)
@@ -165,7 +165,7 @@ class FiringRecordViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='approve')
     def approve(self, request, pk=None):
         record = self.get_object()
-        if record.status in (FiringRecord.STATUS_PENDING, FiringRecord.STATUS_FIRING, FiringRecord.STATUS_SUSPENDED):
+        if record.status in (FiringRecord.STATUS_PENDING, FiringRecord.STATUS_FIRING, FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_SUSPENDED):
             return Response(
                 {'detail': f'当前状态为"{record.get_status_display()}"，不可直接定样'},
                 status=status.HTTP_400_BAD_REQUEST,
