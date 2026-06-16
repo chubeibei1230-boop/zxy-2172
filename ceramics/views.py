@@ -9,7 +9,7 @@ import django_filters
 
 from .models import (
     GlazeColor, BodyType, KilnBatch, TemperatureZone,
-    ResponsiblePerson, FiringRecord,
+    ResponsiblePerson, FiringRecord, RectificationOrder,
 )
 from .serializers import (
     GlazeColorSerializer, BodyTypeSerializer, KilnBatchSerializer,
@@ -19,6 +19,11 @@ from .serializers import (
     RetestSerializer, AdjustSerializer, SuspendSerializer, ApproveSerializer,
     HighRiskGlazeSerializer, PendingRetestSerializer, ZoneAnomalySerializer,
     ClosedLoopTaskSerializer, ClosedLoopDetailSerializer,
+    RectificationOrderListSerializer, RectificationOrderDetailSerializer,
+    RectificationOrderCreateSerializer, RectificationOrderUpdateSerializer,
+    RectificationAnalyzeSerializer, RectificationSubmitSerializer,
+    RectificationConfirmSerializer, RectificationReopenSerializer,
+    RectificationDashboardSerializer,
 )
 
 
@@ -76,6 +81,8 @@ class FiringRecordViewSet(viewsets.ModelViewSet):
     queryset = FiringRecord.objects.select_related(
         'glaze_color', 'body_type', 'kiln_batch',
         'temperature_zone', 'responsible_person',
+    ).prefetch_related(
+        'rectification_orders',
     ).all()
     filterset_class = FiringRecordFilter
     search_fields = ['glaze_color__code', 'glaze_color__name', 'kiln_batch__batch_code']
@@ -756,4 +763,202 @@ def closed_loop_detail(request, pk):
     }
 
     serializer = ClosedLoopDetailSerializer(data)
+    return Response(serializer.data)
+
+
+class RectificationOrderFilter(django_filters.FilterSet):
+    date_from = django_filters.DateTimeFilter(field_name='created_at', lookup_expr='gte')
+    date_to = django_filters.DateTimeFilter(field_name='created_at', lookup_expr='lte')
+    planned_from = django_filters.DateFilter(field_name='planned_completion_date', lookup_expr='gte')
+    planned_to = django_filters.DateFilter(field_name='planned_completion_date', lookup_expr='lte')
+    is_overdue = django_filters.BooleanFilter(method='filter_is_overdue')
+
+    class Meta:
+        model = RectificationOrder
+        fields = {
+            'firing_record': ['exact'],
+            'firing_record__glaze_color': ['exact'],
+            'firing_record__kiln_batch': ['exact'],
+            'responsible_person': ['exact'],
+            'status': ['exact'],
+            'anomaly_type': ['exact'],
+            'cause_category': ['exact'],
+        }
+
+    def filter_is_overdue(self, queryset, name, value):
+        from django.utils import timezone
+        today = timezone.now().date()
+        if value:
+            return queryset.filter(
+                status__in=[
+                    RectificationOrder.STATUS_PENDING_ANALYSIS,
+                    RectificationOrder.STATUS_RECTIFYING,
+                    RectificationOrder.STATUS_PENDING_CONFIRM,
+                ],
+                planned_completion_date__lt=today,
+            )
+        else:
+            return queryset.exclude(
+                status__in=[
+                    RectificationOrder.STATUS_PENDING_ANALYSIS,
+                    RectificationOrder.STATUS_RECTIFYING,
+                    RectificationOrder.STATUS_PENDING_CONFIRM,
+                ],
+                planned_completion_date__lt=today,
+            )
+
+
+class RectificationOrderViewSet(viewsets.ModelViewSet):
+    queryset = RectificationOrder.objects.select_related(
+        'firing_record', 'firing_record__glaze_color', 'firing_record__body_type',
+        'firing_record__kiln_batch', 'firing_record__temperature_zone',
+        'firing_record__responsible_person', 'responsible_person',
+    ).all()
+    filterset_class = RectificationOrderFilter
+    search_fields = ['order_no', 'anomaly_description', 'rectification_measures']
+    ordering_fields = [
+        'created_at', 'planned_completion_date', 'status',
+        'close_time', 'updated_at',
+    ]
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return RectificationOrderListSerializer
+        if self.action == 'retrieve':
+            return RectificationOrderDetailSerializer
+        if self.action == 'create':
+            return RectificationOrderCreateSerializer
+        if self.action in ('update', 'partial_update'):
+            return RectificationOrderUpdateSerializer
+        return RectificationOrderDetailSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        instance = serializer.instance
+        detail_serializer = RectificationOrderDetailSerializer(instance)
+        return Response(detail_serializer.data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        detail_serializer = RectificationOrderDetailSerializer(instance)
+        return Response(detail_serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='analyze')
+    def analyze(self, request, pk=None):
+        order = self.get_object()
+        if order.status != RectificationOrder.STATUS_PENDING_ANALYSIS:
+            return Response(
+                {'detail': f'当前状态为"{order.get_status_display()}"，只有"待分析"状态可执行分析操作'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = RectificationAnalyzeSerializer(instance=order, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(RectificationOrderDetailSerializer(order).data)
+
+    @action(detail=True, methods=['post'], url_path='submit')
+    def submit(self, request, pk=None):
+        order = self.get_object()
+        if order.status != RectificationOrder.STATUS_RECTIFYING:
+            return Response(
+                {'detail': f'当前状态为"{order.get_status_display()}"，只有"整改中"状态可提交整改结果'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = RectificationSubmitSerializer(instance=order, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(RectificationOrderDetailSerializer(order).data)
+
+    @action(detail=True, methods=['post'], url_path='confirm')
+    def confirm(self, request, pk=None):
+        order = self.get_object()
+        if order.status != RectificationOrder.STATUS_PENDING_CONFIRM:
+            return Response(
+                {'detail': f'当前状态为"{order.get_status_display()}"，只有"待确认"状态可执行确认关闭操作'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = RectificationConfirmSerializer(instance=order, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(RectificationOrderDetailSerializer(order).data)
+
+    @action(detail=True, methods=['post'], url_path='reopen')
+    def reopen(self, request, pk=None):
+        order = self.get_object()
+        if order.status != RectificationOrder.STATUS_CLOSED:
+            return Response(
+                {'detail': f'当前状态为"{order.get_status_display()}"，只有"已关闭"状态可重新打开'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = RectificationReopenSerializer(instance=order, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(RectificationOrderDetailSerializer(order).data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def rectification_dashboard(request):
+    from django.utils import timezone
+    now = timezone.now()
+    today = now.date()
+
+    pending_count = RectificationOrder.objects.filter(
+        status=RectificationOrder.STATUS_PENDING_ANALYSIS
+    ).count()
+
+    rectifying_count = RectificationOrder.objects.filter(
+        status=RectificationOrder.STATUS_RECTIFYING
+    ).count()
+
+    pending_confirm_count = RectificationOrder.objects.filter(
+        status=RectificationOrder.STATUS_PENDING_CONFIRM
+    ).count()
+
+    closed_count = RectificationOrder.objects.filter(
+        status=RectificationOrder.STATUS_CLOSED
+    ).count()
+
+    active_orders = RectificationOrder.objects.filter(
+        status__in=[
+            RectificationOrder.STATUS_PENDING_ANALYSIS,
+            RectificationOrder.STATUS_RECTIFYING,
+            RectificationOrder.STATUS_PENDING_CONFIRM,
+        ],
+        planned_completion_date__lt=today,
+    )
+
+    total_overdue_count = active_orders.count()
+    pending_overdue_count = active_orders.filter(
+        status=RectificationOrder.STATUS_PENDING_ANALYSIS
+    ).count()
+    rectifying_overdue_count = active_orders.filter(
+        status=RectificationOrder.STATUS_RECTIFYING
+    ).count()
+
+    recently_closed = RectificationOrder.objects.select_related(
+        'firing_record', 'firing_record__glaze_color', 'firing_record__kiln_batch',
+        'responsible_person',
+    ).filter(
+        status=RectificationOrder.STATUS_CLOSED
+    ).order_by('-close_time')[:10]
+
+    data = {
+        'pending_count': pending_count,
+        'rectifying_count': rectifying_count,
+        'pending_confirm_count': pending_confirm_count,
+        'closed_count': closed_count,
+        'total_overdue_count': total_overdue_count,
+        'pending_overdue_count': pending_overdue_count,
+        'rectifying_overdue_count': rectifying_overdue_count,
+        'recently_closed': recently_closed,
+    }
+
+    serializer = RectificationDashboardSerializer(data)
     return Response(serializer.data)

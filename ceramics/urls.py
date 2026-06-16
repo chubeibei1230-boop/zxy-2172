@@ -5,9 +5,9 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from .views import (
     GlazeColorViewSet, BodyTypeViewSet, KilnBatchViewSet,
     TemperatureZoneViewSet, ResponsiblePersonViewSet,
-    FiringRecordViewSet,
+    FiringRecordViewSet, RectificationOrderViewSet,
     high_risk_glaze_ranking, pending_retest_tasks, zone_anomaly_distribution,
-    closed_loop_tasks, closed_loop_detail,
+    closed_loop_tasks, closed_loop_detail, rectification_dashboard,
 )
 
 router = DefaultRouter()
@@ -17,6 +17,7 @@ router.register(r'kiln-batches', KilnBatchViewSet)
 router.register(r'temperature-zones', TemperatureZoneViewSet)
 router.register(r'responsible-persons', ResponsiblePersonViewSet)
 router.register(r'firing-records', FiringRecordViewSet)
+router.register(r'rectification-orders', RectificationOrderViewSet)
 
 urlpatterns = [
     path('api/', include(router.urls)),
@@ -27,4 +28,5 @@ urlpatterns = [
     path('api/stats/zone-anomaly/', zone_anomaly_distribution, name='zone_anomaly'),
     path('api/closed-loop/tasks/', closed_loop_tasks, name='closed_loop_tasks'),
     path('api/closed-loop/tasks/<int:pk>/', closed_loop_detail, name='closed_loop_detail'),
+    path('api/stats/rectification-dashboard/', rectification_dashboard, name='rectification_dashboard'),
 ]

@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.utils import timezone
 from .models import (
     GlazeColor, BodyType, KilnBatch, TemperatureZone,
-    ResponsiblePerson, FiringRecord,
+    ResponsiblePerson, FiringRecord, RectificationOrder,
 )
 
 
@@ -36,6 +36,16 @@ class ResponsiblePersonSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+class FiringRecordRectificationSummarySerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    order_no = serializers.CharField()
+    status = serializers.CharField()
+    status_display = serializers.CharField()
+    anomaly_type = serializers.CharField()
+    anomaly_type_display = serializers.CharField()
+    is_overdue = serializers.BooleanField()
+
+
 class FiringRecordListSerializer(serializers.ModelSerializer):
     glaze_color_code = serializers.CharField(source='glaze_color.code', read_only=True)
     glaze_color_name = serializers.CharField(source='glaze_color.name', read_only=True)
@@ -46,6 +56,9 @@ class FiringRecordListSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     color_difference_display = serializers.CharField(source='get_color_difference_display', read_only=True)
     pinhole_condition_display = serializers.CharField(source='get_pinhole_condition_display', read_only=True)
+    has_rectification = serializers.SerializerMethodField()
+    rectification_count = serializers.SerializerMethodField()
+    rectification_orders = serializers.SerializerMethodField()
 
     class Meta:
         model = FiringRecord
@@ -59,8 +72,35 @@ class FiringRecordListSerializer(serializers.ModelSerializer):
             'color_difference', 'color_difference_display',
             'pinhole_condition', 'pinhole_condition_display',
             'glaze_flow_desc', 'retest_conclusion', 'handling_suggestion',
+            'has_rectification', 'rectification_count', 'rectification_orders',
             'created_at', 'updated_at',
         ]
+
+    def get_has_rectification(self, obj):
+        return hasattr(obj, 'rectification_orders') and obj.rectification_orders.exists()
+
+    def get_rectification_count(self, obj):
+        if hasattr(obj, 'rectification_orders'):
+            return obj.rectification_orders.count()
+        return 0
+
+    def get_rectification_orders(self, obj):
+        if not hasattr(obj, 'rectification_orders'):
+            return []
+        orders = obj.rectification_orders.select_related(
+            'responsible_person'
+        ).all()[:5]
+        return FiringRecordRectificationSummarySerializer([
+            {
+                'id': o.id,
+                'order_no': o.order_no,
+                'status': o.status,
+                'status_display': o.get_status_display(),
+                'anomaly_type': o.anomaly_type,
+                'anomaly_type_display': o.get_anomaly_type_display(),
+                'is_overdue': o.is_overdue,
+            } for o in orders
+        ], many=True).data
 
 
 class FiringRecordCreateSerializer(serializers.ModelSerializer):
@@ -324,4 +364,209 @@ class ClosedLoopDetailSerializer(serializers.Serializer):
     is_overdue = serializers.BooleanField()
     remaining_days = serializers.IntegerField(allow_null=True)
     overdue_days = serializers.IntegerField(allow_null=True)
+
+
+class RectificationOrderListSerializer(serializers.ModelSerializer):
+    firing_record_id = serializers.IntegerField(source='firing_record.id', read_only=True)
+    firing_record_display = serializers.CharField(source='firing_record.__str__', read_only=True)
+    glaze_color_code = serializers.CharField(source='firing_record.glaze_color.code', read_only=True)
+    glaze_color_name = serializers.CharField(source='firing_record.glaze_color.name', read_only=True)
+    kiln_batch_code = serializers.CharField(source='firing_record.kiln_batch.batch_code', read_only=True)
+    trial_sequence = serializers.IntegerField(source='firing_record.trial_sequence', read_only=True)
+    responsible_person_name = serializers.CharField(source='responsible_person.name', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    anomaly_type_display = serializers.CharField(source='get_anomaly_type_display', read_only=True)
+    cause_category_display = serializers.CharField(source='get_cause_category_display', read_only=True)
+    is_overdue = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = RectificationOrder
+        fields = [
+            'id', 'order_no', 'firing_record_id', 'firing_record_display',
+            'glaze_color_code', 'glaze_color_name',
+            'kiln_batch_code', 'trial_sequence',
+            'anomaly_type', 'anomaly_type_display',
+            'anomaly_description',
+            'cause_category', 'cause_category_display',
+            'responsible_person', 'responsible_person_name',
+            'planned_completion_date',
+            'status', 'status_display',
+            'is_overdue',
+            'close_time',
+            'created_at', 'updated_at',
+        ]
+
+
+class RectificationOrderDetailSerializer(serializers.ModelSerializer):
+    firing_record_id = serializers.IntegerField(source='firing_record.id', read_only=True)
+    firing_record_display = serializers.CharField(source='firing_record.__str__', read_only=True)
+    glaze_color_code = serializers.CharField(source='firing_record.glaze_color.code', read_only=True)
+    glaze_color_name = serializers.CharField(source='firing_record.glaze_color.name', read_only=True)
+    body_type_name = serializers.CharField(source='firing_record.body_type.name', read_only=True)
+    kiln_batch_code = serializers.CharField(source='firing_record.kiln_batch.batch_code', read_only=True)
+    kiln_batch_date = serializers.DateField(source='firing_record.kiln_batch.firing_date', read_only=True)
+    trial_sequence = serializers.IntegerField(source='firing_record.trial_sequence', read_only=True)
+    temperature_zone_name = serializers.CharField(source='firing_record.temperature_zone.name', read_only=True)
+    responsible_person_name = serializers.CharField(source='responsible_person.name', read_only=True)
+    responsible_person_contact = serializers.CharField(source='responsible_person.contact', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    anomaly_type_display = serializers.CharField(source='get_anomaly_type_display', read_only=True)
+    cause_category_display = serializers.CharField(source='get_cause_category_display', read_only=True)
+    is_overdue = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = RectificationOrder
+        fields = [
+            'id', 'order_no',
+            'firing_record_id', 'firing_record_display',
+            'glaze_color_code', 'glaze_color_name',
+            'body_type_name',
+            'kiln_batch_code', 'kiln_batch_date',
+            'trial_sequence',
+            'temperature_zone_name',
+            'anomaly_type', 'anomaly_type_display',
+            'anomaly_description',
+            'cause_category', 'cause_category_display',
+            'cause_detail',
+            'responsible_person', 'responsible_person_name', 'responsible_person_contact',
+            'rectification_measures',
+            'planned_completion_date',
+            'rectification_result',
+            'status', 'status_display',
+            'is_overdue',
+            'analysis_time', 'rectification_time', 'confirm_time', 'close_time',
+            'created_at', 'updated_at',
+        ]
+
+
+class RectificationOrderCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RectificationOrder
+        fields = [
+            'id', 'firing_record', 'anomaly_type', 'anomaly_description',
+            'cause_category', 'cause_detail', 'responsible_person',
+            'rectification_measures', 'planned_completion_date',
+        ]
+
+    def validate(self, data):
+        firing_record = data.get('firing_record')
+        anomaly_type = data.get('anomaly_type')
+
+        if anomaly_type == RectificationOrder.ANOMALY_COLOR_DIFF_HIGH:
+            if firing_record.color_difference not in (FiringRecord.COLOR_DIFF_HIGH, FiringRecord.COLOR_DIFF_SEVERE):
+                raise serializers.ValidationError(
+                    {'anomaly_type': '该试烧记录色差不满足偏高/严重条件，无法发起此类整改单'}
+                )
+        elif anomaly_type == RectificationOrder.ANOMALY_COLOR_DIFF_SEVERE:
+            if firing_record.color_difference != FiringRecord.COLOR_DIFF_SEVERE:
+                raise serializers.ValidationError(
+                    {'anomaly_type': '该试烧记录色差不满足严重条件，无法发起此类整改单'}
+                )
+        elif anomaly_type == RectificationOrder.ANOMALY_PINHOLE_MODERATE:
+            if firing_record.pinhole_condition not in (FiringRecord.PINHOLE_MODERATE, FiringRecord.PINHOLE_SEVERE):
+                raise serializers.ValidationError(
+                    {'anomaly_type': '该试烧记录针孔情况不满足中等/严重条件，无法发起此类整改单'}
+                )
+        elif anomaly_type == RectificationOrder.ANOMALY_PINHOLE_SEVERE:
+            if firing_record.pinhole_condition != FiringRecord.PINHOLE_SEVERE:
+                raise serializers.ValidationError(
+                    {'anomaly_type': '该试烧记录针孔情况不满足严重条件，无法发起此类整改单'}
+                )
+        elif anomaly_type == RectificationOrder.ANOMALY_SUSPENDED:
+            if firing_record.status != FiringRecord.STATUS_SUSPENDED:
+                raise serializers.ValidationError(
+                    {'anomaly_type': '该试烧记录未处于暂停状态，无法发起此类整改单'}
+                )
+
+        return data
+
+    def create(self, validated_data):
+        from django.utils import timezone
+        from .models import RectificationOrder
+
+        today_str = timezone.now().strftime('%Y%m%d')
+        count = RectificationOrder.objects.filter(order_no__startswith=f'ZG{today_str}').count()
+        order_no = f'ZG{today_str}{count + 1:04d}'
+
+        validated_data['order_no'] = order_no
+        return super().create(validated_data)
+
+
+class RectificationOrderUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RectificationOrder
+        fields = [
+            'anomaly_description', 'cause_category', 'cause_detail',
+            'responsible_person', 'rectification_measures',
+            'planned_completion_date', 'rectification_result',
+        ]
+
+
+class RectificationAnalyzeSerializer(serializers.Serializer):
+    cause_category = serializers.ChoiceField(choices=RectificationOrder.CAUSE_CATEGORY_CHOICES, required=True)
+    cause_detail = serializers.CharField(required=False, default='')
+    rectification_measures = serializers.CharField(required=False, default='')
+    planned_completion_date = serializers.DateField(required=True)
+    analysis_time = serializers.DateTimeField(required=False, default=None)
+
+    def update(self, instance, validated_data):
+        from django.utils import timezone
+        instance.cause_category = validated_data['cause_category']
+        instance.cause_detail = validated_data.get('cause_detail', instance.cause_detail)
+        instance.rectification_measures = validated_data.get('rectification_measures', instance.rectification_measures)
+        instance.planned_completion_date = validated_data['planned_completion_date']
+        instance.analysis_time = validated_data.get('analysis_time') or timezone.now()
+        instance.status = RectificationOrder.STATUS_RECTIFYING
+        instance.save()
+        return instance
+
+
+class RectificationSubmitSerializer(serializers.Serializer):
+    rectification_result = serializers.CharField(required=True)
+    rectification_time = serializers.DateTimeField(required=False, default=None)
+
+    def update(self, instance, validated_data):
+        from django.utils import timezone
+        instance.rectification_result = validated_data['rectification_result']
+        instance.rectification_time = validated_data.get('rectification_time') or timezone.now()
+        instance.status = RectificationOrder.STATUS_PENDING_CONFIRM
+        instance.save()
+        return instance
+
+
+class RectificationConfirmSerializer(serializers.Serializer):
+    confirm_time = serializers.DateTimeField(required=False, default=None)
+    close_time = serializers.DateTimeField(required=False, default=None)
+
+    def update(self, instance, validated_data):
+        from django.utils import timezone
+        now = validated_data.get('confirm_time') or timezone.now()
+        instance.confirm_time = now
+        instance.close_time = validated_data.get('close_time') or now
+        instance.status = RectificationOrder.STATUS_CLOSED
+        instance.save()
+        return instance
+
+
+class RectificationReopenSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=True)
+
+    def update(self, instance, validated_data):
+        instance.status = RectificationOrder.STATUS_RECTIFYING
+        instance.rectification_result = ''
+        instance.confirm_time = None
+        instance.close_time = None
+        instance.save()
+        return instance
+
+
+class RectificationDashboardSerializer(serializers.Serializer):
+    pending_count = serializers.IntegerField()
+    rectifying_count = serializers.IntegerField()
+    pending_confirm_count = serializers.IntegerField()
+    closed_count = serializers.IntegerField()
+    total_overdue_count = serializers.IntegerField()
+    pending_overdue_count = serializers.IntegerField()
+    rectifying_overdue_count = serializers.IntegerField()
+    recently_closed = RectificationOrderListSerializer(many=True)
 
