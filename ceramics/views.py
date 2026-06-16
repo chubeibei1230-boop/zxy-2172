@@ -586,6 +586,12 @@ def closed_loop_tasks(request):
         'temperature_zone', 'responsible_person',
     ).all()
 
+    include_terminal = request.query_params.get('include_terminal', 'false')
+    if include_terminal.lower() not in ('true', '1', 'yes'):
+        queryset = queryset.exclude(
+            status__in=(FiringRecord.STATUS_APPROVED, FiringRecord.STATUS_SUSPENDED)
+        )
+
     responsible_person_id = request.query_params.get('responsible_person')
     if responsible_person_id:
         queryset = queryset.filter(responsible_person_id=responsible_person_id)
