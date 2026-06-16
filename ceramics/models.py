@@ -152,13 +152,15 @@ class RectificationOrder(models.Model):
     ANOMALY_PINHOLE_MODERATE = 'pinhole_moderate'
     ANOMALY_PINHOLE_SEVERE = 'pinhole_severe'
     ANOMALY_SUSPENDED = 'suspended'
+    ANOMALY_RETEST_OVERDUE = 'retest_overdue'
 
     ANOMALY_TYPE_CHOICES = [
         (ANOMALY_COLOR_DIFF_HIGH, '色差偏高'),
         (ANOMALY_COLOR_DIFF_SEVERE, '色差严重'),
         (ANOMALY_PINHOLE_MODERATE, '针孔中等'),
         (ANOMALY_PINHOLE_SEVERE, '针孔严重'),
-        (ANOMALY_SUSPENDED, '暂停状态'),
+        (ANOMALY_SUSPENDED, '暂停使用'),
+        (ANOMALY_RETEST_OVERDUE, '复测超期'),
     ]
 
     CAUSE_FORMULA = 'formula'
@@ -218,3 +220,69 @@ class RectificationOrder(models.Model):
             return False
         today = timezone.now().date()
         return today > self.planned_completion_date
+
+    @property
+    def remaining_days(self):
+        from django.utils import timezone
+        if self.status == self.STATUS_CLOSED:
+            return None
+        if not self.planned_completion_date:
+            return None
+        today = timezone.now().date()
+        delta = (self.planned_completion_date - today).days
+        return delta if delta >= 0 else None
+
+    @property
+    def overdue_days(self):
+        from django.utils import timezone
+        if self.status == self.STATUS_CLOSED:
+            return None
+        if not self.planned_completion_date:
+            return None
+        today = timezone.now().date()
+        delta = (today - self.planned_completion_date).days
+        return delta if delta > 0 else None
+
+
+class RectificationHistory(models.Model):
+    ACTION_CREATE = 'create'
+    ACTION_ANALYZE = 'analyze'
+    ACTION_SUBMIT = 'submit'
+    ACTION_CONFIRM = 'confirm'
+    ACTION_REOPEN = 'reopen'
+    ACTION_UPDATE = 'update'
+    ACTION_COMMENT = 'comment'
+
+    ACTION_CHOICES = [
+        (ACTION_CREATE, '创建整改单'),
+        (ACTION_ANALYZE, '原因分析'),
+        (ACTION_SUBMIT, '提交整改'),
+        (ACTION_CONFIRM, '确认关闭'),
+        (ACTION_REOPEN, '退回整改'),
+        (ACTION_UPDATE, '信息更新'),
+        (ACTION_COMMENT, '备注'),
+    ]
+
+    rectification_order = models.ForeignKey(
+        RectificationOrder,
+        on_delete=models.CASCADE,
+        related_name='history_records'
+    )
+    action = models.CharField(max_length=30, choices=ACTION_CHOICES)
+    action_display = models.CharField(max_length=50, blank=True, default='')
+    operator_name = models.CharField(max_length=100, blank=True, default='')
+    description = models.TextField(blank=True, default='')
+    previous_status = models.CharField(max_length=30, blank=True, default='')
+    current_status = models.CharField(max_length=30, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.rectification_order.order_no} - {self.get_action_display()}"
+
+    def save(self, *args, **kwargs):
+        if not self.action_display:
+            self.action_display = self.get_action_display()
+        super().save(*args, **kwargs)

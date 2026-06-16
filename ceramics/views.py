@@ -10,6 +10,7 @@ import django_filters
 from .models import (
     GlazeColor, BodyType, KilnBatch, TemperatureZone,
     ResponsiblePerson, FiringRecord, RectificationOrder,
+    RectificationHistory,
 )
 from .serializers import (
     GlazeColorSerializer, BodyTypeSerializer, KilnBatchSerializer,
@@ -23,7 +24,8 @@ from .serializers import (
     RectificationOrderCreateSerializer, RectificationOrderUpdateSerializer,
     RectificationAnalyzeSerializer, RectificationSubmitSerializer,
     RectificationConfirmSerializer, RectificationReopenSerializer,
-    RectificationDashboardSerializer,
+    RectificationDashboardSerializer, RectificationHistorySerializer,
+    RectificationHistoryCreateSerializer, PendingAbnormalItemSerializer,
 )
 
 
@@ -766,19 +768,42 @@ def closed_loop_detail(request, pk):
     return Response(serializer.data)
 
 
+def _create_rectification_history(order, action, operator_name='', description=''):
+    previous_status = order.status
+    history = RectificationHistory.objects.create(
+        rectification_order=order,
+        action=action,
+        operator_name=operator_name,
+        description=description,
+        previous_status=previous_status,
+        current_status=order.status,
+    )
+    return history
+
+
 class RectificationOrderFilter(django_filters.FilterSet):
     date_from = django_filters.DateTimeFilter(field_name='created_at', lookup_expr='gte')
     date_to = django_filters.DateTimeFilter(field_name='created_at', lookup_expr='lte')
     planned_from = django_filters.DateFilter(field_name='planned_completion_date', lookup_expr='gte')
     planned_to = django_filters.DateFilter(field_name='planned_completion_date', lookup_expr='lte')
     is_overdue = django_filters.BooleanFilter(method='filter_is_overdue')
+    body_type = django_filters.ModelChoiceFilter(
+        field_name='firing_record__body_type',
+        queryset=BodyType.objects.all()
+    )
+    temperature_zone = django_filters.ModelChoiceFilter(
+        field_name='firing_record__temperature_zone',
+        queryset=TemperatureZone.objects.all()
+    )
 
     class Meta:
         model = RectificationOrder
         fields = {
             'firing_record': ['exact'],
             'firing_record__glaze_color': ['exact'],
+            'firing_record__body_type': ['exact'],
             'firing_record__kiln_batch': ['exact'],
+            'firing_record__temperature_zone': ['exact'],
             'responsible_person': ['exact'],
             'status': ['exact'],
             'anomaly_type': ['exact'],
@@ -813,6 +838,8 @@ class RectificationOrderViewSet(viewsets.ModelViewSet):
         'firing_record', 'firing_record__glaze_color', 'firing_record__body_type',
         'firing_record__kiln_batch', 'firing_record__temperature_zone',
         'firing_record__responsible_person', 'responsible_person',
+    ).prefetch_related(
+        'history_records',
     ).all()
     filterset_class = RectificationOrderFilter
     search_fields = ['order_no', 'anomaly_description', 'rectification_measures']
@@ -830,13 +857,27 @@ class RectificationOrderViewSet(viewsets.ModelViewSet):
             return RectificationOrderCreateSerializer
         if self.action in ('update', 'partial_update'):
             return RectificationOrderUpdateSerializer
+        if self.action == 'history':
+            return RectificationHistorySerializer
         return RectificationOrderDetailSerializer
+
+    def get_operator_name(self, request):
+        if request.user and request.user.is_authenticated:
+            return request.user.get_full_name() or request.user.username
+        return ''
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
         instance = serializer.instance
+        operator_name = self.get_operator_name(request)
+        _create_rectification_history(
+            instance,
+            RectificationHistory.ACTION_CREATE,
+            operator_name,
+            f'创建整改单，异常类型：{instance.get_anomaly_type_display()}'
+        )
         detail_serializer = RectificationOrderDetailSerializer(instance)
         return Response(detail_serializer.data, status=status.HTTP_201_CREATED)
 
@@ -846,8 +887,38 @@ class RectificationOrderViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
+        operator_name = self.get_operator_name(request)
+        _create_rectification_history(
+            instance,
+            RectificationHistory.ACTION_UPDATE,
+            operator_name,
+            '更新整改单信息'
+        )
         detail_serializer = RectificationOrderDetailSerializer(instance)
         return Response(detail_serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='history')
+    def history(self, request, pk=None):
+        order = self.get_object()
+        history_records = order.history_records.all()
+        serializer = RectificationHistorySerializer(history_records, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='add-history')
+    def add_history(self, request, pk=None):
+        order = self.get_object()
+        data = request.data.copy()
+        data['rectification_order'] = order.id
+        operator_name = self.get_operator_name(request)
+        if 'operator_name' not in data or not data['operator_name']:
+            data['operator_name'] = operator_name
+        serializer = RectificationHistoryCreateSerializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(
+            previous_status=order.status,
+            current_status=order.status,
+        )
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], url_path='analyze')
     def analyze(self, request, pk=None):
@@ -860,6 +931,13 @@ class RectificationOrderViewSet(viewsets.ModelViewSet):
         serializer = RectificationAnalyzeSerializer(instance=order, data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        operator_name = self.get_operator_name(request)
+        _create_rectification_history(
+            order,
+            RectificationHistory.ACTION_ANALYZE,
+            operator_name,
+            f'完成原因分析，原因分类：{order.get_cause_category_display()}'
+        )
         return Response(RectificationOrderDetailSerializer(order).data)
 
     @action(detail=True, methods=['post'], url_path='submit')
@@ -873,6 +951,13 @@ class RectificationOrderViewSet(viewsets.ModelViewSet):
         serializer = RectificationSubmitSerializer(instance=order, data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        operator_name = self.get_operator_name(request)
+        _create_rectification_history(
+            order,
+            RectificationHistory.ACTION_SUBMIT,
+            operator_name,
+            '提交整改结果，等待确认'
+        )
         return Response(RectificationOrderDetailSerializer(order).data)
 
     @action(detail=True, methods=['post'], url_path='confirm')
@@ -886,6 +971,13 @@ class RectificationOrderViewSet(viewsets.ModelViewSet):
         serializer = RectificationConfirmSerializer(instance=order, data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        operator_name = self.get_operator_name(request)
+        _create_rectification_history(
+            order,
+            RectificationHistory.ACTION_CONFIRM,
+            operator_name,
+            '确认整改完成，关闭整改单'
+        )
         return Response(RectificationOrderDetailSerializer(order).data)
 
     @action(detail=True, methods=['post'], url_path='reopen')
@@ -899,6 +991,14 @@ class RectificationOrderViewSet(viewsets.ModelViewSet):
         serializer = RectificationReopenSerializer(instance=order, data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        operator_name = self.get_operator_name(request)
+        reason = request.data.get('reason', '')
+        _create_rectification_history(
+            order,
+            RectificationHistory.ACTION_REOPEN,
+            operator_name,
+            f'退回继续整改，原因：{reason}'
+        )
         return Response(RectificationOrderDetailSerializer(order).data)
 
 
@@ -971,3 +1071,250 @@ def rectification_dashboard(request):
 
     serializer = RectificationDashboardSerializer(data)
     return Response(serializer.data)
+
+
+ANOMALY_TYPE_MAP = {
+    RectificationOrder.ANOMALY_COLOR_DIFF_HIGH: '色差偏高',
+    RectificationOrder.ANOMALY_COLOR_DIFF_SEVERE: '色差严重',
+    RectificationOrder.ANOMALY_PINHOLE_MODERATE: '针孔中等',
+    RectificationOrder.ANOMALY_PINHOLE_SEVERE: '针孔严重',
+    RectificationOrder.ANOMALY_SUSPENDED: '暂停使用',
+    RectificationOrder.ANOMALY_RETEST_OVERDUE: '复测超期',
+}
+
+
+def _get_active_rectification(firing_record_id, anomaly_type):
+    active = RectificationOrder.objects.filter(
+        firing_record_id=firing_record_id,
+        anomaly_type=anomaly_type,
+        status__in=[
+            RectificationOrder.STATUS_PENDING_ANALYSIS,
+            RectificationOrder.STATUS_RECTIFYING,
+            RectificationOrder.STATUS_PENDING_CONFIRM,
+        ],
+    ).first()
+    if active:
+        return {
+            'id': active.id,
+            'status': active.status,
+            'status_display': active.get_status_display(),
+        }
+    return None
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def pending_abnormal_list(request):
+    from django.utils import timezone
+    now = timezone.now()
+
+    anomaly_type = request.query_params.get('anomaly_type', '')
+    glaze_color_id = request.query_params.get('glaze_color')
+    body_type_id = request.query_params.get('body_type')
+    kiln_batch_id = request.query_params.get('kiln_batch')
+    temperature_zone_id = request.query_params.get('temperature_zone')
+    responsible_person_id = request.query_params.get('responsible_person')
+    has_rectification = request.query_params.get('has_rectification', '')
+
+    results = []
+
+    firing_records_qs = FiringRecord.objects.select_related(
+        'glaze_color', 'body_type', 'kiln_batch',
+        'temperature_zone', 'responsible_person',
+    ).all()
+
+    if glaze_color_id:
+        firing_records_qs = firing_records_qs.filter(glaze_color_id=glaze_color_id)
+    if body_type_id:
+        firing_records_qs = firing_records_qs.filter(body_type_id=body_type_id)
+    if kiln_batch_id:
+        firing_records_qs = firing_records_qs.filter(kiln_batch_id=kiln_batch_id)
+    if temperature_zone_id:
+        firing_records_qs = firing_records_qs.filter(temperature_zone_id=temperature_zone_id)
+    if responsible_person_id:
+        firing_records_qs = firing_records_qs.filter(responsible_person_id=responsible_person_id)
+
+    for record in firing_records_qs:
+        anomalies = []
+
+        if not anomaly_type or anomaly_type == RectificationOrder.ANOMALY_COLOR_DIFF_HIGH:
+            if record.color_difference == FiringRecord.COLOR_DIFF_HIGH:
+                anomalies.append((
+                    RectificationOrder.ANOMALY_COLOR_DIFF_HIGH,
+                    '色差偏高，需调整配方或工艺',
+                ))
+
+        if not anomaly_type or anomaly_type == RectificationOrder.ANOMALY_COLOR_DIFF_SEVERE:
+            if record.color_difference == FiringRecord.COLOR_DIFF_SEVERE:
+                anomalies.append((
+                    RectificationOrder.ANOMALY_COLOR_DIFF_SEVERE,
+                    '色差严重，需紧急整改',
+                ))
+
+        if not anomaly_type or anomaly_type == RectificationOrder.ANOMALY_PINHOLE_MODERATE:
+            if record.pinhole_condition == FiringRecord.PINHOLE_MODERATE:
+                anomalies.append((
+                    RectificationOrder.ANOMALY_PINHOLE_MODERATE,
+                    '针孔中等，需排查原因',
+                ))
+
+        if not anomaly_type or anomaly_type == RectificationOrder.ANOMALY_PINHOLE_SEVERE:
+            if record.pinhole_condition == FiringRecord.PINHOLE_SEVERE:
+                anomalies.append((
+                    RectificationOrder.ANOMALY_PINHOLE_SEVERE,
+                    '针孔严重，需紧急整改',
+                ))
+
+        if not anomaly_type or anomaly_type == RectificationOrder.ANOMALY_SUSPENDED:
+            if record.status == FiringRecord.STATUS_SUSPENDED:
+                anomalies.append((
+                    RectificationOrder.ANOMALY_SUSPENDED,
+                    '已暂停使用，需评估整改',
+                ))
+
+        if not anomaly_type or anomaly_type == RectificationOrder.ANOMALY_RETEST_OVERDUE:
+            if record.status in (FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_ADJUSTING):
+                if record.kiln_out_time and not record.retest_conclusion:
+                    cycle = record.glaze_color.retest_cycle_days
+                    days_since = (now - record.kiln_out_time).days
+                    if days_since > cycle:
+                        anomalies.append((
+                            RectificationOrder.ANOMALY_RETEST_OVERDUE,
+                            f'复测已超期{days_since - cycle}天，需尽快复测',
+                        ))
+
+        for atype, adesc in anomalies:
+            active_rect = _get_active_rectification(record.id, atype)
+            has_active = active_rect is not None
+
+            if has_rectification == 'true' and not has_active:
+                continue
+            if has_rectification == 'false' and has_active:
+                continue
+
+            results.append({
+                'firing_record_id': record.id,
+                'glaze_color_id': record.glaze_color_id,
+                'glaze_color_code': record.glaze_color.code,
+                'glaze_color_name': record.glaze_color.name,
+                'body_type_id': record.body_type_id,
+                'body_type_name': record.body_type.name,
+                'kiln_batch_id': record.kiln_batch_id,
+                'kiln_batch_code': record.kiln_batch.batch_code,
+                'kiln_batch_date': record.kiln_batch.firing_date,
+                'trial_sequence': record.trial_sequence,
+                'temperature_zone_id': record.temperature_zone_id,
+                'temperature_zone_name': record.temperature_zone.name,
+                'responsible_person_id': record.responsible_person_id,
+                'responsible_person_name': record.responsible_person.name,
+                'anomaly_type': atype,
+                'anomaly_type_display': ANOMALY_TYPE_MAP.get(atype, atype),
+                'anomaly_description': adesc,
+                'has_active_rectification': has_active,
+                'active_rectification_id': active_rect['id'] if active_rect else None,
+                'active_rectification_status': active_rect['status'] if active_rect else None,
+                'active_rectification_status_display': active_rect['status_display'] if active_rect else None,
+                'created_at': record.created_at,
+            })
+
+    ordering = request.query_params.get('ordering', '-created_at')
+    if ordering == 'anomaly_type':
+        results.sort(key=lambda x: x['anomaly_type'])
+    elif ordering == '-anomaly_type':
+        results.sort(key=lambda x: x['anomaly_type'], reverse=True)
+    elif ordering == 'glaze_color_code':
+        results.sort(key=lambda x: x['glaze_color_code'])
+    elif ordering == '-glaze_color_code':
+        results.sort(key=lambda x: x['glaze_color_code'], reverse=True)
+    elif ordering == 'has_active_rectification':
+        results.sort(key=lambda x: x['has_active_rectification'])
+    elif ordering == '-has_active_rectification':
+        results.sort(key=lambda x: x['has_active_rectification'], reverse=True)
+    elif ordering == 'created_at':
+        results.sort(key=lambda x: x['created_at'])
+    else:
+        results.sort(key=lambda x: x['created_at'], reverse=True)
+
+    serializer = PendingAbnormalItemSerializer(results, many=True)
+    return Response({
+        'count': len(results),
+        'results': serializer.data,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def abnormal_summary(request):
+    from django.utils import timezone
+    now = timezone.now()
+
+    color_diff_high = FiringRecord.objects.filter(
+        color_difference=FiringRecord.COLOR_DIFF_HIGH
+    ).count()
+    color_diff_severe = FiringRecord.objects.filter(
+        color_difference=FiringRecord.COLOR_DIFF_SEVERE
+    ).count()
+    pinhole_moderate = FiringRecord.objects.filter(
+        pinhole_condition=FiringRecord.PINHOLE_MODERATE
+    ).count()
+    pinhole_severe = FiringRecord.objects.filter(
+        pinhole_condition=FiringRecord.PINHOLE_SEVERE
+    ).count()
+    suspended = FiringRecord.objects.filter(
+        status=FiringRecord.STATUS_SUSPENDED
+    ).count()
+
+    retest_overdue = 0
+    overdue_records = FiringRecord.objects.filter(
+        status__in=(FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_ADJUSTING),
+        kiln_out_time__isnull=False,
+        retest_conclusion='',
+    ).select_related('glaze_color')
+    for r in overdue_records:
+        cycle = r.glaze_color.retest_cycle_days
+        days_since = (now - r.kiln_out_time).days
+        if days_since > cycle:
+            retest_overdue += 1
+
+    pending_total = RectificationOrder.objects.filter(
+        status__in=[
+            RectificationOrder.STATUS_PENDING_ANALYSIS,
+            RectificationOrder.STATUS_RECTIFYING,
+            RectificationOrder.STATUS_PENDING_CONFIRM,
+        ]
+    ).count()
+
+    today = now.date()
+    overdue = RectificationOrder.objects.filter(
+        status__in=[
+            RectificationOrder.STATUS_PENDING_ANALYSIS,
+            RectificationOrder.STATUS_RECTIFYING,
+            RectificationOrder.STATUS_PENDING_CONFIRM,
+        ],
+        planned_completion_date__lt=today,
+    ).count()
+
+    processing = RectificationOrder.objects.filter(
+        status=RectificationOrder.STATUS_RECTIFYING
+    ).count()
+
+    closed = RectificationOrder.objects.filter(
+        status=RectificationOrder.STATUS_CLOSED
+    ).count()
+
+    return Response({
+        'anomaly_counts': {
+            'color_diff_high': color_diff_high,
+            'color_diff_severe': color_diff_severe,
+            'pinhole_moderate': pinhole_moderate,
+            'pinhole_severe': pinhole_severe,
+            'suspended': suspended,
+            'retest_overdue': retest_overdue,
+        },
+        'rectification_counts': {
+            'pending_total': pending_total,
+            'overdue': overdue,
+            'processing': processing,
+            'closed': closed,
+        },
+    })

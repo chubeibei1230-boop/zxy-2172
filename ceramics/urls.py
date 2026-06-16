@@ -8,6 +8,7 @@ from .views import (
     FiringRecordViewSet, RectificationOrderViewSet,
     high_risk_glaze_ranking, pending_retest_tasks, zone_anomaly_distribution,
     closed_loop_tasks, closed_loop_detail, rectification_dashboard,
+    pending_abnormal_list, abnormal_summary,
 )
 
 router = DefaultRouter()
@@ -29,4 +30,6 @@ urlpatterns = [
     path('api/closed-loop/tasks/', closed_loop_tasks, name='closed_loop_tasks'),
     path('api/closed-loop/tasks/<int:pk>/', closed_loop_detail, name='closed_loop_detail'),
     path('api/stats/rectification-dashboard/', rectification_dashboard, name='rectification_dashboard'),
+    path('api/abnormal/pending/', pending_abnormal_list, name='pending_abnormal_list'),
+    path('api/stats/abnormal-summary/', abnormal_summary, name='abnormal_summary'),
 ]
