@@ -450,6 +450,23 @@ class RectificationOrderCreateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {'anomaly_type': '该试烧记录未处于暂停状态，无法发起此类整改单'}
                 )
+        elif anomaly_type == RectificationOrder.ANOMALY_RETEST_OVERDUE:
+            if firing_record.status not in (FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_ADJUSTING):
+                raise serializers.ValidationError(
+                    {'anomaly_type': '该试烧记录不处于待复测或调整中状态，无法发起此类整改单'}
+                )
+            if not firing_record.kiln_out_time or firing_record.retest_conclusion:
+                raise serializers.ValidationError(
+                    {'anomaly_type': '该试烧记录已完成复测或未出窑，无法发起复测超期整改单'}
+                )
+            from django.utils import timezone
+            now = timezone.now()
+            cycle = firing_record.glaze_color.retest_cycle_days
+            days_since = (now - firing_record.kiln_out_time).days
+            if days_since <= cycle:
+                raise serializers.ValidationError(
+                    {'anomaly_type': f'该试烧记录出窑仅{days_since}天，未超过复测周期{cycle}天，不满足超期条件'}
+                )
 
         return data
 
@@ -530,6 +547,32 @@ class RectificationReopenSerializer(serializers.Serializer):
         instance.confirm_time = None
         instance.close_time = None
         instance.save()
+        return instance
+
+
+class RectificationRejectSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=True)
+    operator_name = serializers.CharField(required=False, default='')
+
+    def update(self, instance, validated_data):
+        from django.utils import timezone
+        now = timezone.now()
+        instance.confirm_time = now
+        instance.close_time = now
+        instance.status = RectificationOrder.STATUS_CLOSED
+        instance.save()
+
+        instance.status = RectificationOrder.STATUS_RECTIFYING
+        instance.rectification_result = ''
+        instance.confirm_time = None
+        instance.close_time = None
+        instance.analysis_time = None
+        instance.rectification_time = None
+        instance.cause_category = ''
+        instance.cause_detail = ''
+        instance.rectification_measures = ''
+        instance.save()
+
         return instance
 
 
@@ -623,6 +666,9 @@ class PendingAbnormalItemSerializer(serializers.Serializer):
     active_rectification_id = serializers.IntegerField(allow_null=True)
     active_rectification_status = serializers.CharField(allow_null=True)
     active_rectification_status_display = serializers.CharField(allow_null=True)
+    latest_rectification_id = serializers.IntegerField(allow_null=True)
+    latest_rectification_status = serializers.CharField(allow_null=True)
+    latest_rectification_status_display = serializers.CharField(allow_null=True)
     created_at = serializers.DateTimeField()
 
 

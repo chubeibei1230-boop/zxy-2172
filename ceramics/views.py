@@ -24,6 +24,7 @@ from .serializers import (
     RectificationOrderCreateSerializer, RectificationOrderUpdateSerializer,
     RectificationAnalyzeSerializer, RectificationSubmitSerializer,
     RectificationConfirmSerializer, RectificationReopenSerializer,
+    RectificationRejectSerializer,
     RectificationDashboardSerializer, RectificationHistorySerializer,
     RectificationHistoryCreateSerializer, PendingAbnormalItemSerializer,
 )
@@ -859,6 +860,8 @@ class RectificationOrderViewSet(viewsets.ModelViewSet):
             return RectificationOrderUpdateSerializer
         if self.action == 'history':
             return RectificationHistorySerializer
+        if self.action == 'reject':
+            return RectificationRejectSerializer
         return RectificationOrderDetailSerializer
 
     def get_operator_name(self, request):
@@ -1001,6 +1004,33 @@ class RectificationOrderViewSet(viewsets.ModelViewSet):
         )
         return Response(RectificationOrderDetailSerializer(order).data)
 
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject(self, request, pk=None):
+        order = self.get_object()
+        if order.status != RectificationOrder.STATUS_PENDING_CONFIRM:
+            return Response(
+                {'detail': f'当前状态为"{order.get_status_display()}"，只有"待确认"状态可执行退回操作'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = RectificationRejectSerializer(instance=order, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        operator_name = self.get_operator_name(request)
+        reason = request.data.get('reason', '')
+        _create_rectification_history(
+            order,
+            RectificationHistory.ACTION_REOPEN,
+            operator_name,
+            f'验收不通过，先确认关闭后重新打开整改。退回原因：{reason}'
+        )
+        _create_rectification_history(
+            order,
+            RectificationHistory.ACTION_CREATE,
+            operator_name,
+            f'重新发起整改，原因：{reason}'
+        )
+        return Response(RectificationOrderDetailSerializer(order).data)
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -1102,6 +1132,28 @@ def _get_active_rectification(firing_record_id, anomaly_type):
     return None
 
 
+def _get_latest_rectification(firing_record_id, anomaly_type):
+    latest = RectificationOrder.objects.filter(
+        firing_record_id=firing_record_id,
+        anomaly_type=anomaly_type,
+    ).order_by('-created_at').first()
+    if latest:
+        return {
+            'id': latest.id,
+            'status': latest.status,
+            'status_display': latest.get_status_display(),
+        }
+    return None
+
+
+def _has_closed_rectification(firing_record_id, anomaly_type):
+    return RectificationOrder.objects.filter(
+        firing_record_id=firing_record_id,
+        anomaly_type=anomaly_type,
+        status=RectificationOrder.STATUS_CLOSED,
+    ).exists()
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def pending_abnormal_list(request):
@@ -1115,6 +1167,8 @@ def pending_abnormal_list(request):
     temperature_zone_id = request.query_params.get('temperature_zone')
     responsible_person_id = request.query_params.get('responsible_person')
     has_rectification = request.query_params.get('has_rectification', '')
+    rectification_status = request.query_params.get('rectification_status', '')
+    exclude_closed = request.query_params.get('exclude_closed', 'true')
 
     results = []
 
@@ -1184,13 +1238,26 @@ def pending_abnormal_list(request):
                         ))
 
         for atype, adesc in anomalies:
+            if exclude_closed.lower() in ('true', '1', 'yes'):
+                if _has_closed_rectification(record.id, atype):
+                    continue
+
             active_rect = _get_active_rectification(record.id, atype)
+            latest_rect = _get_latest_rectification(record.id, atype)
             has_active = active_rect is not None
+            rect_status = latest_rect['status'] if latest_rect else None
 
             if has_rectification == 'true' and not has_active:
                 continue
             if has_rectification == 'false' and has_active:
                 continue
+
+            if rectification_status:
+                status_list = rectification_status.split(',')
+                if rect_status and rect_status not in status_list:
+                    continue
+                if not rect_status and 'none' not in status_list:
+                    continue
 
             results.append({
                 'firing_record_id': record.id,
@@ -1214,6 +1281,9 @@ def pending_abnormal_list(request):
                 'active_rectification_id': active_rect['id'] if active_rect else None,
                 'active_rectification_status': active_rect['status'] if active_rect else None,
                 'active_rectification_status_display': active_rect['status_display'] if active_rect else None,
+                'latest_rectification_id': latest_rect['id'] if latest_rect else None,
+                'latest_rectification_status': latest_rect['status'] if latest_rect else None,
+                'latest_rectification_status_display': latest_rect['status_display'] if latest_rect else None,
                 'created_at': record.created_at,
             })
 
