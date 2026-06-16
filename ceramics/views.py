@@ -18,6 +18,7 @@ from .serializers import (
     FiringRecordUpdateSerializer, KilnInSerializer, KilnOutSerializer,
     RetestSerializer, AdjustSerializer, SuspendSerializer, ApproveSerializer,
     HighRiskGlazeSerializer, PendingRetestSerializer, ZoneAnomalySerializer,
+    ClosedLoopTaskSerializer, ClosedLoopDetailSerializer,
 )
 
 
@@ -434,4 +435,319 @@ def zone_anomaly_distribution(request):
         })
 
     serializer = ZoneAnomalySerializer(results, many=True)
+    return Response(serializer.data)
+
+
+NODE_MAP = {
+    FiringRecord.STATUS_PENDING: 'pending',
+    FiringRecord.STATUS_FIRING: 'kiln_in',
+    FiringRecord.STATUS_PENDING_RETEST: 'kiln_out',
+    FiringRecord.STATUS_RETESTED: 'retest',
+    FiringRecord.STATUS_ADJUSTING: 'adjust',
+    FiringRecord.STATUS_APPROVED: 'approve',
+    FiringRecord.STATUS_SUSPENDED: 'suspend',
+}
+
+NODE_NAME_MAP = {
+    'pending': '待试烧',
+    'kiln_in': '入窑',
+    'kiln_out': '出窑',
+    'retest': '复测',
+    'adjust': '调整',
+    'approve': '定样',
+    'suspend': '暂停',
+}
+
+
+def _get_anomaly_summary(record):
+    anomalies = []
+    if record.color_difference == FiringRecord.COLOR_DIFF_SEVERE:
+        anomalies.append('色差严重')
+    elif record.color_difference == FiringRecord.COLOR_DIFF_HIGH:
+        anomalies.append('色差偏高')
+    if record.pinhole_condition == FiringRecord.PINHOLE_SEVERE:
+        anomalies.append('针孔严重')
+    elif record.pinhole_condition == FiringRecord.PINHOLE_MODERATE:
+        anomalies.append('针孔中等')
+    if record.glaze_flow_desc:
+        anomalies.append('釉面流动异常')
+    if not anomalies:
+        return '无明显异常'
+    return '、'.join(anomalies)
+
+
+def _get_suggested_action(record):
+    if record.status == FiringRecord.STATUS_PENDING:
+        return '请安排入窑试烧'
+    if record.status == FiringRecord.STATUS_FIRING:
+        return '等待出窑后进行质量检验'
+    if record.status == FiringRecord.STATUS_PENDING_RETEST:
+        return '请尽快完成复测并填写结论'
+    if record.status == FiringRecord.STATUS_RETESTED:
+        if record.color_difference in (FiringRecord.COLOR_DIFF_HIGH, FiringRecord.COLOR_DIFF_SEVERE):
+            return '建议进行配方或工艺调整后复测'
+        return '可进行定样审批'
+    if record.status == FiringRecord.STATUS_ADJUSTING:
+        return '请在调整后安排复测验证'
+    if record.status == FiringRecord.STATUS_APPROVED:
+        return '已定样，可投入批量生产'
+    if record.status == FiringRecord.STATUS_SUSPENDED:
+        return '已暂停，待评估后决定'
+    return ''
+
+
+def _get_overdue_info(record, now):
+    cycle = record.glaze_color.retest_cycle_days
+    record_status = record.status
+
+    if record_status in (FiringRecord.STATUS_PENDING, FiringRecord.STATUS_FIRING):
+        return None, None, False
+
+    if not record.kiln_out_time:
+        return None, None, False
+
+    deadline = record.kiln_out_time + timezone.timedelta(days=cycle)
+    days_diff = (deadline - now).days
+
+    if record_status in (FiringRecord.STATUS_APPROVED, FiringRecord.STATUS_SUSPENDED):
+        return None, None, False
+
+    if days_diff >= 0:
+        return days_diff, None, False
+    else:
+        return None, abs(days_diff), True
+
+
+def _get_time_nodes(record):
+    nodes = [
+        {'node_key': 'pending', 'node_name': '创建', 'time': record.created_at, 'completed': True},
+        {'node_key': 'kiln_in', 'node_name': '入窑', 'time': record.kiln_in_time, 'completed': record.kiln_in_time is not None},
+        {'node_key': 'kiln_out', 'node_name': '出窑', 'time': record.kiln_out_time, 'completed': record.kiln_out_time is not None},
+        {'node_key': 'retest', 'node_name': '复测', 'time': record.retest_time, 'completed': record.retest_time is not None},
+        {'node_key': 'adjust', 'node_name': '调整', 'time': record.adjust_time, 'completed': record.adjust_time is not None},
+    ]
+    if record.status == FiringRecord.STATUS_APPROVED:
+        nodes.append({'node_key': 'approve', 'node_name': '定样', 'time': record.approve_time, 'completed': True})
+    if record.status == FiringRecord.STATUS_SUSPENDED:
+        nodes.append({'node_key': 'suspend', 'node_name': '暂停', 'time': record.suspend_time, 'completed': True})
+    return nodes
+
+
+def _get_next_actions(record):
+    actions = []
+    status = record.status
+
+    actions.append({
+        'action_key': 'kiln_in',
+        'action_name': '入窑',
+        'enabled': status == FiringRecord.STATUS_PENDING,
+        'reason': '' if status == FiringRecord.STATUS_PENDING else '仅待试烧状态可入窑',
+    })
+    actions.append({
+        'action_key': 'kiln_out',
+        'action_name': '出窑',
+        'enabled': status == FiringRecord.STATUS_FIRING,
+        'reason': '' if status == FiringRecord.STATUS_FIRING else '仅试烧中状态可出窑',
+    })
+    actions.append({
+        'action_key': 'retest',
+        'action_name': '复测',
+        'enabled': status in (FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_ADJUSTING),
+        'reason': '' if status in (FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_ADJUSTING) else '仅待复测或调整中状态可复测',
+    })
+    actions.append({
+        'action_key': 'adjust',
+        'action_name': '调整',
+        'enabled': status in (FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_RETESTED, FiringRecord.STATUS_ADJUSTING),
+        'reason': '' if status in (FiringRecord.STATUS_PENDING_RETEST, FiringRecord.STATUS_RETESTED, FiringRecord.STATUS_ADJUSTING) else '仅待复测、已复测或调整中状态可调整',
+    })
+    actions.append({
+        'action_key': 'approve',
+        'action_name': '定样',
+        'enabled': status in (FiringRecord.STATUS_RETESTED, FiringRecord.STATUS_ADJUSTING) and bool(record.retest_conclusion),
+        'reason': '' if (status in (FiringRecord.STATUS_RETESTED, FiringRecord.STATUS_ADJUSTING) and bool(record.retest_conclusion)) else '需已复测且有复测结论才可定样',
+    })
+    actions.append({
+        'action_key': 'suspend',
+        'action_name': '暂停',
+        'enabled': status != FiringRecord.STATUS_SUSPENDED,
+        'reason': '' if status != FiringRecord.STATUS_SUSPENDED else '已处于暂停状态',
+    })
+
+    return actions
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def closed_loop_tasks(request):
+    now = timezone.now()
+    queryset = FiringRecord.objects.select_related(
+        'glaze_color', 'body_type', 'kiln_batch',
+        'temperature_zone', 'responsible_person',
+    ).all()
+
+    responsible_person_id = request.query_params.get('responsible_person')
+    if responsible_person_id:
+        queryset = queryset.filter(responsible_person_id=responsible_person_id)
+
+    glaze_color_id = request.query_params.get('glaze_color')
+    if glaze_color_id:
+        queryset = queryset.filter(glaze_color_id=glaze_color_id)
+
+    status_val = request.query_params.get('status')
+    if status_val:
+        queryset = queryset.filter(status=status_val)
+
+    is_overdue = request.query_params.get('is_overdue')
+    if is_overdue is not None and is_overdue != '':
+        is_overdue_bool = is_overdue.lower() in ('true', '1', 'yes')
+        overdue_ids = []
+        for r in queryset:
+            _, _, overdue = _get_overdue_info(r, now)
+            if overdue == is_overdue_bool:
+                overdue_ids.append(r.id)
+        queryset = queryset.filter(id__in=overdue_ids)
+
+    date_from = request.query_params.get('kiln_date_from')
+    if date_from:
+        queryset = queryset.filter(kiln_batch__firing_date__gte=date_from)
+
+    date_to = request.query_params.get('kiln_date_to')
+    if date_to:
+        queryset = queryset.filter(kiln_batch__firing_date__lte=date_to)
+
+    ordering = request.query_params.get('ordering', '-kiln_out_time')
+    if ordering == 'overdue_days':
+        records_with_days = []
+        for r in queryset:
+            remaining, overdue_days, overdue = _get_overdue_info(r, now)
+            records_with_days.append((r, overdue_days or 0))
+        records_with_days.sort(key=lambda x: x[1], reverse=True)
+        records = [r for r, _ in records_with_days]
+    elif ordering == '-overdue_days':
+        records_with_days = []
+        for r in queryset:
+            remaining, overdue_days, overdue = _get_overdue_info(r, now)
+            records_with_days.append((r, overdue_days or 0))
+        records_with_days.sort(key=lambda x: x[1])
+        records = [r for r, _ in records_with_days]
+    else:
+        queryset = queryset.order_by(ordering)
+        records = list(queryset)
+
+    results = []
+    for r in records:
+        remaining_days, overdue_days, is_overdue_flag = _get_overdue_info(r, now)
+        current_node_key = NODE_MAP.get(r.status, r.status)
+        results.append({
+            'id': r.id,
+            'glaze_color_id': r.glaze_color_id,
+            'glaze_color_code': r.glaze_color.code,
+            'glaze_color_name': r.glaze_color.name,
+            'body_type_id': r.body_type_id,
+            'body_type_name': r.body_type.name,
+            'kiln_batch_id': r.kiln_batch_id,
+            'kiln_batch_code': r.kiln_batch.batch_code,
+            'kiln_batch_date': r.kiln_batch.firing_date,
+            'trial_sequence': r.trial_sequence,
+            'temperature_zone_id': r.temperature_zone_id,
+            'temperature_zone_name': r.temperature_zone.name,
+            'responsible_person_id': r.responsible_person_id,
+            'responsible_person_name': r.responsible_person.name,
+            'status': r.status,
+            'status_display': r.get_status_display(),
+            'current_node': current_node_key,
+            'remaining_days': remaining_days,
+            'overdue_days': overdue_days,
+            'is_overdue': is_overdue_flag,
+            'anomaly_summary': _get_anomaly_summary(r),
+            'suggested_action': _get_suggested_action(r),
+            'adjust_count': r.adjust_count,
+            'kiln_out_time': r.kiln_out_time,
+            'retest_cycle_days': r.glaze_color.retest_cycle_days,
+        })
+
+    serializer = ClosedLoopTaskSerializer(results, many=True)
+    return Response({
+        'count': len(results),
+        'results': serializer.data,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def closed_loop_detail(request, pk):
+    try:
+        record = FiringRecord.objects.select_related(
+            'glaze_color', 'body_type', 'kiln_batch',
+            'temperature_zone', 'responsible_person',
+        ).get(pk=pk)
+    except FiringRecord.DoesNotExist:
+        return Response(
+            {'detail': '记录不存在'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    now = timezone.now()
+    remaining_days, overdue_days, is_overdue_flag = _get_overdue_info(record, now)
+    current_node_key = NODE_MAP.get(record.status, record.status)
+
+    basic_info = {
+        'id': record.id,
+        'glaze_color': {
+            'id': record.glaze_color_id,
+            'code': record.glaze_color.code,
+            'name': record.glaze_color.name,
+        },
+        'body_type': {
+            'id': record.body_type_id,
+            'name': record.body_type.name,
+        },
+        'kiln_batch': {
+            'id': record.kiln_batch_id,
+            'batch_code': record.kiln_batch.batch_code,
+            'firing_date': record.kiln_batch.firing_date,
+        },
+        'trial_sequence': record.trial_sequence,
+        'temperature_zone': {
+            'id': record.temperature_zone_id,
+            'name': record.temperature_zone.name,
+        },
+        'responsible_person': {
+            'id': record.responsible_person_id,
+            'name': record.responsible_person.name,
+            'contact': record.responsible_person.contact,
+        },
+        'status': record.status,
+        'status_display': record.get_status_display(),
+    }
+
+    quality_anomaly = {
+        'color_difference': record.color_difference,
+        'color_difference_display': record.get_color_difference_display(),
+        'pinhole_condition': record.pinhole_condition,
+        'pinhole_condition_display': record.get_pinhole_condition_display(),
+        'glaze_flow_desc': record.glaze_flow_desc,
+        'anomaly_summary': _get_anomaly_summary(record),
+    }
+
+    time_nodes = _get_time_nodes(record)
+    next_actions = _get_next_actions(record)
+
+    data = {
+        'id': record.id,
+        'basic_info': basic_info,
+        'quality_anomaly': quality_anomaly,
+        'retest_conclusion': record.retest_conclusion,
+        'handling_suggestion': record.handling_suggestion,
+        'time_nodes': time_nodes,
+        'next_actions': next_actions,
+        'adjust_count': record.adjust_count,
+        'current_node': current_node_key,
+        'is_overdue': is_overdue_flag,
+        'remaining_days': remaining_days,
+        'overdue_days': overdue_days,
+    }
+
+    serializer = ClosedLoopDetailSerializer(data)
     return Response(serializer.data)

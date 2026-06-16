@@ -7,6 +7,7 @@ from .views import (
     TemperatureZoneViewSet, ResponsiblePersonViewSet,
     FiringRecordViewSet,
     high_risk_glaze_ranking, pending_retest_tasks, zone_anomaly_distribution,
+    closed_loop_tasks, closed_loop_detail,
 )
 
 router = DefaultRouter()
@@ -24,4 +25,6 @@ urlpatterns = [
     path('api/stats/high-risk-glaze/', high_risk_glaze_ranking, name='high_risk_glaze'),
     path('api/stats/pending-retest/', pending_retest_tasks, name='pending_retest'),
     path('api/stats/zone-anomaly/', zone_anomaly_distribution, name='zone_anomaly'),
+    path('api/closed-loop/tasks/', closed_loop_tasks, name='closed_loop_tasks'),
+    path('api/closed-loop/tasks/<int:pk>/', closed_loop_detail, name='closed_loop_detail'),
 ]

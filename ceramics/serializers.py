@@ -179,6 +179,7 @@ class KilnOutSerializer(serializers.Serializer):
         instance.pinhole_condition = validated_data.get('pinhole_condition', instance.pinhole_condition)
         instance.glaze_flow_desc = validated_data.get('glaze_flow_desc', instance.glaze_flow_desc)
         instance.status = FiringRecord.STATUS_PENDING_RETEST
+        instance.adjust_count = 0
         instance.save()
         return instance
 
@@ -186,10 +187,12 @@ class KilnOutSerializer(serializers.Serializer):
 class RetestSerializer(serializers.Serializer):
     retest_conclusion = serializers.CharField(required=True)
     handling_suggestion = serializers.CharField(required=False, default='')
+    retest_time = serializers.DateTimeField(required=False, default=None)
 
     def update(self, instance, validated_data):
         instance.retest_conclusion = validated_data['retest_conclusion']
         instance.handling_suggestion = validated_data.get('handling_suggestion', instance.handling_suggestion)
+        instance.retest_time = validated_data.get('retest_time') or timezone.now()
         instance.status = FiringRecord.STATUS_RETESTED
         instance.save()
         return instance
@@ -197,27 +200,35 @@ class RetestSerializer(serializers.Serializer):
 
 class AdjustSerializer(serializers.Serializer):
     handling_suggestion = serializers.CharField(required=False, default='')
+    adjust_time = serializers.DateTimeField(required=False, default=None)
 
     def update(self, instance, validated_data):
         instance.status = FiringRecord.STATUS_ADJUSTING
         instance.handling_suggestion = validated_data.get('handling_suggestion', instance.handling_suggestion)
+        instance.adjust_time = validated_data.get('adjust_time') or timezone.now()
+        instance.adjust_count = instance.adjust_count + 1
         instance.save()
         return instance
 
 
 class SuspendSerializer(serializers.Serializer):
     handling_suggestion = serializers.CharField(required=False, default='')
+    suspend_time = serializers.DateTimeField(required=False, default=None)
 
     def update(self, instance, validated_data):
         instance.status = FiringRecord.STATUS_SUSPENDED
         instance.handling_suggestion = validated_data.get('handling_suggestion', instance.handling_suggestion)
+        instance.suspend_time = validated_data.get('suspend_time') or timezone.now()
         instance.save()
         return instance
 
 
 class ApproveSerializer(serializers.Serializer):
+    approve_time = serializers.DateTimeField(required=False, default=None)
+
     def update(self, instance, validated_data):
         instance.status = FiringRecord.STATUS_APPROVED
+        instance.approve_time = validated_data.get('approve_time') or timezone.now()
         instance.save()
         return instance
 
@@ -256,3 +267,61 @@ class ZoneAnomalySerializer(serializers.Serializer):
     high_color_diff_count = serializers.IntegerField()
     severe_pinhole_count = serializers.IntegerField()
     anomaly_rate = serializers.FloatField()
+
+
+class ClosedLoopTaskSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    glaze_color_id = serializers.IntegerField()
+    glaze_color_code = serializers.CharField()
+    glaze_color_name = serializers.CharField()
+    body_type_id = serializers.IntegerField()
+    body_type_name = serializers.CharField()
+    kiln_batch_id = serializers.IntegerField()
+    kiln_batch_code = serializers.CharField()
+    kiln_batch_date = serializers.DateField()
+    trial_sequence = serializers.IntegerField()
+    temperature_zone_id = serializers.IntegerField()
+    temperature_zone_name = serializers.CharField()
+    responsible_person_id = serializers.IntegerField()
+    responsible_person_name = serializers.CharField()
+    status = serializers.CharField()
+    status_display = serializers.CharField()
+    current_node = serializers.CharField()
+    remaining_days = serializers.IntegerField(allow_null=True)
+    overdue_days = serializers.IntegerField(allow_null=True)
+    is_overdue = serializers.BooleanField()
+    anomaly_summary = serializers.CharField()
+    suggested_action = serializers.CharField()
+    adjust_count = serializers.IntegerField()
+    kiln_out_time = serializers.DateTimeField(allow_null=True)
+    retest_cycle_days = serializers.IntegerField()
+
+
+class TimeNodeSerializer(serializers.Serializer):
+    node_key = serializers.CharField()
+    node_name = serializers.CharField()
+    time = serializers.DateTimeField(allow_null=True)
+    completed = serializers.BooleanField()
+
+
+class NextActionSerializer(serializers.Serializer):
+    action_key = serializers.CharField()
+    action_name = serializers.CharField()
+    enabled = serializers.BooleanField()
+    reason = serializers.CharField(required=False, default='')
+
+
+class ClosedLoopDetailSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    basic_info = serializers.DictField()
+    quality_anomaly = serializers.DictField()
+    retest_conclusion = serializers.CharField()
+    handling_suggestion = serializers.CharField()
+    time_nodes = TimeNodeSerializer(many=True)
+    next_actions = NextActionSerializer(many=True)
+    adjust_count = serializers.IntegerField()
+    current_node = serializers.CharField()
+    is_overdue = serializers.BooleanField()
+    remaining_days = serializers.IntegerField(allow_null=True)
+    overdue_days = serializers.IntegerField(allow_null=True)
+
